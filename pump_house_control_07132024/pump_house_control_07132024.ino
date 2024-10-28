@@ -17,9 +17,15 @@ const int ledWinterModeInactivePin = A3;
 
 const int pauseButtonPin = A4;
 const int ledPauseActivePin = A5;
+const int waterFlowSensorPin = A6;
+const int currentSensorPin = A7;
+const int temperatureSensorPin = A8;
 
 unsigned long lastFloatCheckTime = 0;
 const unsigned long floatCheckInterval = 2 * 60 * 1000UL;  // 2 minutes in milliseconds
+
+unsigned long lastValveOpenTime = 0;
+const unsigned long valveTimeout = 5 * 60 * 1000UL;  // 5 minutes in milliseconds
 
 int floatMinState = 0;
 int floatMaxState = 0;
@@ -30,7 +36,7 @@ bool cisternFill = false;
 bool autoPondFillActive = false;
 bool isInAutoFillMode = false;
 bool isPaused = false;
-bool buttonPressed = false;  // New global variable
+bool buttonPressed = false;
 
 const unsigned long debounceDelay = 500;  // Set to 500 milliseconds; adjust as needed
 
@@ -48,6 +54,9 @@ void setup() {
   pinMode(ledWinterModeInactivePin, OUTPUT);
   pinMode(pauseButtonPin, INPUT_PULLUP);  // Set the pause button as input with pull-up
   pinMode(ledPauseActivePin, OUTPUT);     // Set the pause LED as output
+  pinMode(waterFlowSensorPin, INPUT);
+  pinMode(currentSensorPin, INPUT);
+  pinMode(temperatureSensorPin, INPUT);
 
   // Initialize the state of LEDs (assuming winter mode is inactive at start)
   digitalWrite(ledWinterModeActivePin, LOW);
@@ -79,6 +88,41 @@ void loop() {
 
   if (autoPondFillActive) {
     controlDeepWellPump(true);
+  }
+
+  checkValveTimeout(currentTime);
+  checkSensors();
+}
+
+void controlDeepWellPump(bool on) {
+  digitalWrite(deepWellPumpPin, on ? LOW : HIGH);
+}
+
+void controlPondFillValve(bool open) {
+  digitalWrite(pondFillValvePin, open ? LOW : HIGH);
+}
+
+void controlSpigotValve(bool open) {
+  digitalWrite(spigotValvePin, open ? LOW : HIGH);
+}
+
+void resetToDefault() {
+  controlDeepWellPump(false);
+  controlPondFillValve(false);
+  controlSpigotValve(false);
+  pondFillStage = false;
+  cisternFill = false;
+  autoPondFillActive = false;
+  isInAutoFillMode = false;
+  buttonPressed = false;  // Reset button state
+  Serial.println("All systems reset to default.");
+}
+
+void checkSerialCommands() {
+  if (Serial.available()) {
+    String command = Serial.readStringUntil('\n');
+    command.trim();
+    processCommand(command);
   }
 }
 
@@ -113,6 +157,7 @@ void processCommand(String command) {
     controlSpigotValve(false);
     Serial.println("Pond fill initiated.");
     handleFloatSwitches();
+    lastValveOpenTime = millis();
   } else if (command == "pond fill off") {
     pondFillStage = false;
     autoPondFillActive = false;
@@ -130,6 +175,7 @@ void processCommand(String command) {
   } else if (command == "open fill valve" && !cisternFill) {
     controlPondFillValve(true);
     Serial.println("Pond fill valve opened.");
+    lastValveOpenTime = millis();
   } else if (command == "close fill valve") {
     controlPondFillValve(false);
     Serial.println("Pond fill valve closed.");
@@ -158,6 +204,8 @@ void processCommand(String command) {
     activateCisternFill();
   } else if (command == "deactivate cistern fill") {
     deactivateCisternFill();
+  } else if (command == "diagnostic mode") {
+    runDiagnostics();
   } else {
     Serial.println("Unknown command: " + command);
   }
@@ -197,6 +245,7 @@ void checkButtonPress() {
         autoPondFillActive = true;
         controlPondFillValve(true);
         Serial.println("Button released: Resuming pond fill.");
+        lastValveOpenTime = millis();
       } else {
         Serial.println("Button released: Float states changed, not resuming pond fill.");
       }
@@ -259,7 +308,6 @@ void handleFloatSwitches() {
       controlPondFillValve(false);
       controlSpigotValve(false);
       Serial.println("High water level detected. Auto-fill stopped.");
-      // Ensure spigot valve reopens if it was previously opened by the button
       if (buttonPressed) {
         controlSpigotValve(true);
         Serial.println("High water level detected: Spigot reopened.");
@@ -281,138 +329,36 @@ void handleFloatSwitches() {
   prevFloatMaxState = floatMaxState;
 }
 
-void controlDeepWellPump(bool on) {
-  digitalWrite(deepWellPumpPin, on ? LOW : HIGH);
-}
+void runDiagnostics() {
+  Serial.println("Running diagnostics...");
 
-void controlPondFillValve(bool open) {
-  digitalWrite(pondFillValvePin, open ? LOW : HIGH);
-}
-
-void controlSpigotValve(bool open) {
-  digitalWrite(spigotValvePin, open ? LOW : HIGH);
-}
-
-void resetToDefault() {
+  // Check pump control
+  controlDeepWellPump(true);
+  delay(1000);
   controlDeepWellPump(false);
+  Serial.println("Deep well pump test complete.");
+
+  // Check pond fill valve
+  controlPondFillValve(true);
+  delay(1000);
   controlPondFillValve(false);
+  Serial.println("Pond fill valve test complete.");
+
+  // Check spigot valve
+  controlSpigotValve(true);
+  delay(1000);
   controlSpigotValve(false);
-  pondFillStage = false;
-  cisternFill = false;
-  autoPondFillActive = false;
-  isInAutoFillMode = false;
-  buttonPressed = false;  // Reset button state
-  Serial.println("All systems reset to default.");
-}
+  Serial.println("Spigot valve test complete.");
 
-void checkSerialCommands() {
-  if (Serial.available()) {
-    String command = Serial.readStringUntil('\n');
-    command.trim();
-    processCommand(command);
-  }
-}
+  // Check LEDs
+  digitalWrite(ledWinterModeActivePin, HIGH);
+  digitalWrite(ledWinterModeInactivePin, HIGH);
+  digitalWrite(ledPauseActivePin, HIGH);
+  delay(1000);
+  digitalWrite(ledWinterModeActivePin, LOW);
+  digitalWrite(ledWinterModeInactivePin, LOW);
+  digitalWrite(ledPauseActivePin, LOW);
+  Serial.println("LED test complete.");
 
-void checkWinterModeButtons() {
-  static bool lastWinterButtonState = HIGH;
-  static bool lastDeactivateWinterButtonState = HIGH;
-  static bool debounceWinter = false;
-  static bool debounceDeactivateWinter = false;
-  static unsigned long lastDebounceTimeWinter = 0;
-  static unsigned long lastDebounceTimeDeactivateWinter = 0;
-
-  bool currentWinterButtonState = digitalRead(winterModeButtonPin);
-  bool currentDeactivateWinterButtonState = digitalRead(deactivateWinterModeButtonPin);
-
-  // Debounce winter mode activation button
-  if (currentWinterButtonState != lastWinterButtonState) {
-    lastDebounceTimeWinter = millis();
-  }
-  if ((millis() - lastDebounceTimeWinter) > debounceDelay && !debounceWinter) {
-    if (currentWinterButtonState == LOW) {
-      isWinterMode = true;
-      debounceWinter = true;
-      digitalWrite(ledWinterModeActivePin, HIGH);
-      digitalWrite(ledWinterModeInactivePin, LOW);
-      Serial.println("Winter mode activated.");
-    }
-  } else if (currentWinterButtonState == HIGH) {
-    debounceWinter = false;
-  }
-
-  // Debounce winter mode deactivation button
-  if (currentDeactivateWinterButtonState != lastDeactivateWinterButtonState) {
-    lastDebounceTimeDeactivateWinter = millis();
-  }
-  if ((millis() - lastDebounceTimeDeactivateWinter) > debounceDelay && !debounceDeactivateWinter) {
-    if (currentDeactivateWinterButtonState == LOW) {
-      isWinterMode = false;
-      debounceDeactivateWinter = true;
-      digitalWrite(ledWinterModeActivePin, LOW);
-      digitalWrite(ledWinterModeInactivePin, HIGH);
-      Serial.println("Winter mode deactivated.");
-    }
-  } else if (currentDeactivateWinterButtonState == HIGH) {
-    debounceDeactivateWinter = false;
-  }
-
-  lastWinterButtonState = currentWinterButtonState;
-  lastDeactivateWinterButtonState = currentDeactivateWinterButtonState;
-}
-
-void checkPauseButton() {
-  static bool lastPauseButtonState = HIGH;
-  static bool debouncePause = false;
-  static unsigned long lastDebounceTimePause = 0;
-
-  bool currentPauseButtonState = digitalRead(pauseButtonPin);
-
-  if (currentPauseButtonState != lastPauseButtonState) {
-    lastDebounceTimePause = millis();
-  }
-
-  if ((millis() - lastDebounceTimePause) > debounceDelay) {
-    if (!debouncePause && currentPauseButtonState == LOW) {
-      isPaused = !isPaused;
-      debouncePause = true;
-
-      if (isPaused) {
-        digitalWrite(ledWinterModeActivePin, LOW);
-        digitalWrite(ledWinterModeInactivePin, LOW);
-        digitalWrite(buttonIndicator, LOW);
-        digitalWrite(ledPauseActivePin, HIGH);
-        Serial.println("System paused.");
-        pauseAllOperations();
-      } else {
-        digitalWrite(ledWinterModeActivePin, HIGH);
-        digitalWrite(ledWinterModeInactivePin, HIGH);
-        digitalWrite(ledPauseActivePin, LOW);
-        Serial.println("System unpaused.");
-        resumeAllOperations();
-      }
-    } else if (currentPauseButtonState == HIGH) {
-      debouncePause = false;
-    }
-  }
-
-  lastPauseButtonState = currentPauseButtonState;
-}
-
-void pauseAllOperations() {
-  controlDeepWellPump(false);
-  controlPondFillValve(false);
-  controlSpigotValve(false);
-}
-
-void resumeAllOperations() {
-  handleFloatSwitches();
-  checkButtonPress();
-
-  if (isWinterMode) {
-    digitalWrite(ledWinterModeActivePin, HIGH);
-    digitalWrite(ledWinterModeInactivePin, LOW);
-  } else {
-    digitalWrite(ledWinterModeActivePin, LOW);
-    digitalWrite(ledWinterModeInactivePin, HIGH);
-  }
+  Serial.println("Diagnostics complete.");
 }
